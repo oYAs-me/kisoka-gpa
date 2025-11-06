@@ -5,14 +5,20 @@ from pprint import pprint
 
 class_data = {}
 
-with open('hantei.csv', 'r', encoding='cp932') as csvfile:
-    reader = csv.reader(csvfile)
-    reader = list(reader)[1:]  # Skip header row
-    for row in reader:
-        class_data[row[1]] = {
-            'genre': row[0],
-            'credits': row[2]
-        }
+# hantei.csvは，自己判定から閲覧できる「●教養・スキル・リテラシー科目 」と「●専門科目 」の科目一覧をExcelにコピーしてCSV形式で保存したもの
+try:
+    with open('hantei.csv', 'r', encoding='cp932') as csvfile:
+        reader = csv.reader(csvfile)
+except UnicodeDecodeError: # cp932かutf-8(BOM付き)で読めるはず
+    with open('hantei.csv', 'r', encoding='utf-8-sig') as csvfile:
+        reader = csv.reader(csvfile)
+reader = list(reader)[1:]  # Skip header row
+for row in reader:
+  class_data[row[1]] = {
+      'genre': row[0],
+      'credits': row[2]
+  }
+
 
 genre = {
     '●教養・スキル・リテラシー科目 ': {
