@@ -1,9 +1,7 @@
 import csv
-import os
 import glob
 import json
 from pprint import pprint
-import re
 
 # 評定を数値に変換するための辞書
 grade_info = {
@@ -74,32 +72,34 @@ elective_compulsory_classes = {
 
 all_classes = [compulsory_classes, elective_classes, elective_compulsory_classes]
 
+# 評定を数値に変換する関数
 def convert_grade_to_number(g):
-  """評定文字列または数値を数値に変換（未登録は0.0）。"""
   if isinstance(g, (int, float)):
     return float(g)
   if g is None:
     return 0.0
   return grade_info.get(str(g).strip(), 0.0)
 
+# 成績のCSVデータを解析して，配属用成績all_classesや卒業単位graduated_classesと学生IDを返す関数
 def parse_csv_data(filename, all_classes, hantei):
   """
-  CSVデータ（bytesならshift_jisでデコード、strならそのまま）を解析して
+  CSVデータ（Shift-JIS or UTF-8(with BOM)）を解析して
   compulsory_classes / elective_classes / elective_compulsory_classes を更新する。
-  学科判定に失敗したら空リストを返す。
+  all_classes: [compulsory_classes, elective_classes, elective_compulsory_classes]
+  返り値: 更新したall_classes, student_id, edited_probability_flag（UTF-8(with BOM)のときExcelで開いて編集した可能性が高いため）, graduated_classes
   """
   print((f'{filename} を解析中...'))
 
-  edited_probability_flag = False
-  graduated_classes = []
+  edited_probability_flag = False # UTF-8(with BOM)で読み込んだ場合に（Excelで編集した疑惑が高いため）Trueにするフラグ
+  graduated_classes = [] # 配属GPA計算に含まれないが卒業単位としてカウントする科目リスト
   
-  hantei_set = set(hantei)
+  hantei_set = set(hantei) # 卒業単位判定用の科目名set
 
-  try:
+  try: # Shift-JISで読み込みを試みる
     with open(filename, 'r', encoding='cp932') as f:
       csv_reader = csv.reader(f)
       lines = [','.join(row) for row in csv_reader]
-  except UnicodeDecodeError:
+  except UnicodeDecodeError: # エラーを吐いたらUTF-8(with BOM)で再読み込み
     with open(filename, "r", encoding='utf-8-sig') as f:
       csv_reader = csv.reader(f)
       lines = [','.join(row) for row in csv_reader]
@@ -113,9 +113,9 @@ def parse_csv_data(filename, all_classes, hantei):
   # 2行目に "理学部基礎化学科" が含まれているかチェック
   if len(lines) < 2 or "理学部基礎化学科" not in lines[1]:
     print(" 対象外の学科です。")
-    return [all_classes]  # 対象外
+    return ""  # 対象外なら積極的にエラーを出す
 
-  for i in range(5, len(lines)):  # 最初の数行とヘッダをスキップ
+  for i in range(5, len(lines)):  # 最初の数行（メタ情報）とヘッダをスキップ
     line = lines[i].strip()
     if not line:
       continue
@@ -124,10 +124,10 @@ def parse_csv_data(filename, all_classes, hantei):
     if len(split_line) < 6:
       continue
 
-    course_title = split_line[4].strip()
-    # grade は末尾から3番目の要素（元のJSロジックに合わせる）
-    grade = split_line[-3].strip() if len(split_line) >= 3 else ''
+    course_title = split_line[4].strip() # 科目名
+    grade = split_line[-3].strip() if len(split_line) >= 3 else '' # 評定
 
+    # 科目名が各辞書（必修・選択・選択必修）に存在する場合、評価を数値に変換して上書き更新
     if course_title in compulsory_classes:
       if compulsory_classes[course_title] <= convert_grade_to_number(grade):
         compulsory_classes[course_title] = convert_grade_to_number(grade)
@@ -138,29 +138,38 @@ def parse_csv_data(filename, all_classes, hantei):
       if elective_compulsory_classes[course_title] <= convert_grade_to_number(grade):
         elective_compulsory_classes[course_title] = convert_grade_to_number(grade)
     else:
+      # 卒業単位判定用データに含まれている科目で，かつ単位を取得している場合，graduated_classesに追加
       if convert_grade_to_number(grade) > 0.0:
         for hantei_title in hantei_set:
           if hantei_title in course_title:
             graduated_classes.append(hantei_title)
       continue
 
-  # 更新した辞書とstudent_idを返す
+  # 更新した辞書などとstudent_idとflagとを返す
   return [compulsory_classes, elective_classes, elective_compulsory_classes], student_id, edited_probability_flag, graduated_classes
 
 # 卒業単位数のうち何単位を取得しているか返す関数
-def calculate_earned_credits(graduated_classes, all_classes, hantei):
+def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
+  """
+  基本的な方針
+   - hanteiは，hantei.jsonに記載の，卒業単位として算入できそうな科目をCampus Squareからコピーして成形してきたデータ
+   - all_classes（配属GPAに入る科目）に登録されている単位数をearned_creditsにカウント
+   - graduated_classes（all_classes以外の卒業単位に加算できる科目）に登録されている科目と単位を，上限が存在するsmall_genre（例：外国語，人文学科目など）ごとに積算
+   - small_genreのうちで卒業に必須な単位数を先にearned_creditsに加算
+   - small_genreごとの上限を超えた分をbig_genre（例：教スリ，専門科目）ごとに積算
+   - big_genreでの積算か上限のいずれか小さい方をearned_creditsに加算
+  """
   # 科目判定用データを取得
   hantei_data = hantei["data"]# = {講義名: {genre: AA, credits: 0}, ...}
 
-  # all_classesに登録済みの単位数をカウント
+  # earned_creditsで卒業単位数をカウント
   earned_credits = 0
+
+  # all_classes（）に登録済みの単位数をカウント
   for class_dict in all_classes:
     for course_title, grade in class_dict.items():
       if grade > 0.0:
         earned_credits += int(hantei_data[course_title]['credits'])
-  
-  print(f" all_classesからカウントした取得単位数: {earned_credits}")
-  pprint(graduated_classes)
   
   # graduated_classesに登録されている科目を，genreごとにカウント
   big_genre = hantei["genre"] # = {big_genre_name: {genre: {small_genre_name: {credits: (int)}, ...}, credits: (int)}, ...}
@@ -178,12 +187,9 @@ def calculate_earned_credits(graduated_classes, all_classes, hantei):
   # big_genreのうちsmall_genreに含まれている単位数をカウントし保存しておく
   bg_sg_delta_credits = {} # sgからあふれた単位数をbgとしてカウントしていい単位数の上限
   for bg, sg_list in bg_sg_includings.items():
-    print(bg)
     total_sg_credits = sum([small_genre_credits[sg] for sg in sg_list]) - 8 # 日本語と英語の単位の被りがあるのでそれを除く！
     bg_total_credits = big_genre[bg]["credits"]
     bg_sg_delta_credits[bg] = max(0, bg_total_credits - total_sg_credits)
-
-  print(bg_sg_delta_credits)
 
   # 取得単位数countのためにsmall_genreをコピーして0に初期化
   counted_sg_credits = {sg: 0 for sg in small_genre_credits.keys()}
@@ -247,6 +253,10 @@ def initialize_all_classes(all_classes):
       class_dict[key] = 0.0
   return all_classes
 
+
+
+
+# ここからメイン処理（上記の関数を適切に呼び出す）
 if __name__ == "__main__":
   print("csvフォルダ内のすべてにGPA計算を開始します。")
 
@@ -262,16 +272,19 @@ if __name__ == "__main__":
     # filenameがgpa_results.csvの場合はスキップ
     if filename == "gpa_results.csv":
       continue
-    initialize_all_classes(all_classes)
-    if filename.endswith(".csv"):
-      all_classes, student_id, edited_probability_flag, graduated_classes = parse_csv_data(filename, all_classes, hantei_data_keys)
-      gpa = calculate_gpa(all_classes)
+    initialize_all_classes(all_classes) # all_classesを初期化
+    if filename.endswith(".csv"): # CSVファイルのみ処理
+      all_classes, student_id, edited_probability_flag, graduated_classes = parse_csv_data(filename, all_classes, hantei_data_keys) # csv解析
+      gpa = calculate_gpa(all_classes) # GPA計算
 
-      earned_credits = calculate_earned_credits(graduated_classes, all_classes, hantei)
+      earned_credits = calculate_earned_credits(graduated_classes, all_classes, hantei) # 卒業単位のうち取得単位数を計算
 
-      print(f" 学生番号: {student_id}, GPA: {gpa:.3f}, 取得単位数: {earned_credits}")
-      gpa_results.append((student_id, gpa, edited_probability_flag, earned_credits))
+      print(f" 学生番号: {student_id}, GPA: {gpa:.3f}, 取得単位数: {earned_credits}") # 結果表示
+      gpa_results.append((student_id, gpa, earned_credits, edited_probability_flag)) # 結果を出力用に保存
   print("すべてのGPA計算が完了しました。")
+
+  # gpa_resultsを学生番号順にソートする
+  gpa_results.sort(key=lambda x: x[0])
 
   # 最後に学籍番号とGPAのみをまとめたCSVファイルを出力する
   output_filename = "gpa_results.csv"
