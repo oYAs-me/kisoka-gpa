@@ -71,9 +71,6 @@ elective_compulsory_classes = {
 
 all_classes = [compulsory_classes, elective_classes, elective_compulsory_classes]
 
-# csvの名前
-filename = "SIRS23RC007.csv"
-
 def convert_grade_to_number(g):
   """評定文字列または数値を数値に変換（未登録は0.0）。"""
   if isinstance(g, (int, float)):
@@ -82,7 +79,7 @@ def convert_grade_to_number(g):
     return 0.0
   return grade_info.get(str(g).strip(), 0.0)
 
-def parse_csv_data(filename=filename, all_classes=all_classes):
+def parse_csv_data(filename, all_classes=all_classes):
   edited_probability_flag = False
   """
   CSVデータ（bytesならshift_jisでデコード、strならそのまま）を解析して
