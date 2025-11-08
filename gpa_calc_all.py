@@ -164,16 +164,11 @@ def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
 
   # earned_creditsで卒業単位数をカウント
   earned_credits = 0
-
-  # all_classes（）に登録済みの単位数をカウント
-  for class_dict in all_classes:
-    for course_title, grade in class_dict.items():
-      if grade > 0.0:
-        earned_credits += int(hantei_data[course_title]['credits'])
   
   # graduated_classesに登録されている科目を，genreごとにカウント
   big_genre = hantei["genre"] # = {big_genre_name: {genre: {small_genre_name: {credits: (int)}, ...}, credits: (int)}, ...}
   small_genre_credits = {sg: sg_data["credits"] for bg_data in big_genre.values() for sg, sg_data in bg_data["genre"].items()} # = {small_genre_name: (int), ...}
+
 
   # big_genreごとにsmall_genreをまとめる
   bg_sg_includings = {}
@@ -187,17 +182,24 @@ def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
   # big_genreのうちsmall_genreに含まれている単位数をカウントし保存しておく
   bg_sg_delta_credits = {} # sgからあふれた単位数をbgとしてカウントしていい単位数の上限
   for bg, sg_list in bg_sg_includings.items():
-    total_sg_credits = sum([small_genre_credits[sg] for sg in sg_list]) - 8 # 日本語と英語の単位の被りがあるのでそれを除く！
+    total_sg_credits = sum([small_genre_credits[sg] for sg in sg_list]) 
+    if bg == "●教養・スキル・リテラシー科目 ":
+      total_sg_credits -= 8 # 教スリは英語と日本語が8単位かぶっているのでその分引く
     bg_total_credits = big_genre[bg]["credits"]
     bg_sg_delta_credits[bg] = max(0, bg_total_credits - total_sg_credits)
 
   # 取得単位数countのためにsmall_genreをコピーして0に初期化
   counted_sg_credits = {sg: 0 for sg in small_genre_credits.keys()}
 
-  # graduated_classesを走査してsmall_genreごとに単位数をカウント
+  # graduated_classesとall_classesを走査してsmall_genreごとに単位数をカウント
   for course_title in graduated_classes:
     class_data = hantei_data[course_title]
     counted_sg_credits[class_data['genre']] += int(class_data['credits'])
+  for class_dict in all_classes:
+    for course_title, grade in class_dict.items():
+      class_data = hantei_data[course_title]
+      if grade > 0.0: # 単位を取得している場合は0より大きいgrade値を持つので
+        counted_sg_credits[class_data['genre']] += int(class_data['credits'])
   
   # small_genreごとに単位数を確認し，範囲内はearned_creditに追加し，超過分はadd_bg_credits_dictに加算
   add_bg_credits_dict = {bg: 0 for bg in big_genre.keys()}
