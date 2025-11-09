@@ -93,7 +93,7 @@ def parse_csv_data(filename, all_classes, hantei):
   edited_probability_flag = False # UTF-8(with BOM)で読み込んだ場合に（Excelで編集した疑惑が高いため）Trueにするフラグ
   graduated_classes = [] # 配属GPA計算に含まれないが卒業単位としてカウントする科目リスト
   
-  hantei_set = set(hantei) # 卒業単位判定用の科目名set
+  hantei_set = set(hantei.keys()) # 卒業単位判定用の科目名set
 
   try: # Shift-JISで読み込みを試みる
     with open(filename, 'r', encoding='cp932') as f:
@@ -107,7 +107,7 @@ def parse_csv_data(filename, all_classes, hantei):
       edited_probability_flag = True
 
 
-  # 1行目の 学生番号 をチェック（"学籍番号"の次の要素を取得）
+  # 1行目の 学生番号 をチェック（"学籍番号"の次の要素を修得）
   student_id = lines[0].split(',')[3].strip() if len(lines) > 0 else ''
 
   # 2行目に "理学部基礎化学科" が含まれているかチェック
@@ -129,27 +129,30 @@ def parse_csv_data(filename, all_classes, hantei):
 
     # 科目名が各辞書（必修・選択・選択必修）に存在する場合、評価を数値に変換して上書き更新
     if course_title in compulsory_classes:
-      if compulsory_classes[course_title] <= convert_grade_to_number(grade):
+      if compulsory_classes[course_title] < convert_grade_to_number(grade):
         compulsory_classes[course_title] = convert_grade_to_number(grade)
     elif course_title in elective_classes:
-      if elective_classes[course_title] <= convert_grade_to_number(grade):
+      if elective_classes[course_title] < convert_grade_to_number(grade):
         elective_classes[course_title] = convert_grade_to_number(grade)
     elif course_title in elective_compulsory_classes:
-      if elective_compulsory_classes[course_title] <= convert_grade_to_number(grade):
+      if elective_compulsory_classes[course_title] < convert_grade_to_number(grade):
         elective_compulsory_classes[course_title] = convert_grade_to_number(grade)
     else:
-      # 卒業単位判定用データに含まれている科目で，かつ単位を取得している場合，graduated_classesに追加
+      # 卒業単位判定用データに含まれている科目で，かつ単位を修得している場合，graduated_classesに追加
       if convert_grade_to_number(grade) > 0.0:
         for hantei_title in hantei_set:
           if hantei_title in course_title:
+            # 教スリ以外の科目は完全一致で判定する（教スリ科目はgenreが「・」から始まるので，hantei[title]['genre'][0]と比較する）
+            if hantei[hantei_title]['genre'][0] != "・" and hantei_title != course_title:
+              continue
             graduated_classes.append(hantei_title)
       continue
 
   # 更新した辞書などとstudent_idとflagとを返す
   return [compulsory_classes, elective_classes, elective_compulsory_classes], student_id, edited_probability_flag, graduated_classes
 
-# 卒業単位数のうち何単位を取得しているか返す関数
-def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
+# 卒業単位数のうち何単位を修得しているか返す関数
+def calculate_earned_credits(graduated_classes, all_classes, hantei):
   """
   基本的な方針
    - hanteiは，hantei.jsonに記載の，卒業単位として算入できそうな科目をCampus Squareからコピーして成形してきたデータ
@@ -159,7 +162,7 @@ def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
    - small_genreごとの上限を超えた分をbig_genre（例：教スリ，専門科目）ごとに積算
    - big_genreでの積算か上限のいずれか小さい方をearned_creditsに加算
   """
-  # 科目判定用データを取得
+  # 科目判定用データを修得
   hantei_data = hantei["data"]# = {講義名: {genre: AA, credits: 0}, ...}
 
   # earned_creditsで卒業単位数をカウント
@@ -188,7 +191,7 @@ def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
     bg_total_credits = big_genre[bg]["credits"]
     bg_sg_delta_credits[bg] = max(0, bg_total_credits - total_sg_credits)
 
-  # 取得単位数countのためにsmall_genreをコピーして0に初期化
+  # 修得単位数countのためにsmall_genreをコピーして0に初期化
   counted_sg_credits = {sg: 0 for sg in small_genre_credits.keys()}
 
   # graduated_classesとall_classesを走査してsmall_genreごとに単位数をカウント
@@ -198,7 +201,7 @@ def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
   for class_dict in all_classes:
     for course_title, grade in class_dict.items():
       class_data = hantei_data[course_title]
-      if grade > 0.0: # 単位を取得している場合は0より大きいgrade値を持つので
+      if grade > 0.0: # 単位を修得している場合は0より大きいgrade値を持つので
         counted_sg_credits[class_data['genre']] += int(class_data['credits'])
   
   # small_genreごとに単位数を確認し，範囲内はearned_creditに追加し，超過分はadd_bg_credits_dictに加算
@@ -216,7 +219,23 @@ def calculate_earned_credits(graduated_classes, all_classes, hantei) -> int:
   for bg, add_credits in add_bg_credits_dict.items():
     earned_credits += min(add_credits, bg_sg_delta_credits[bg])
 
-  return earned_credits
+  # Campus Squareでの「修得済単位数」と同じ値を計算する
+  # small_genre_credits_campus = {sg: 999 for sg, max_credits in small_genre_credits.items()} # Campus Squareではsmall_genreごとの上限が基本的に999に設定されている
+    # 本当は999単位上限ではないsmall_genreもあるが，必修や選択必修を全て修得したときの単位数とsmall_genre_creditsが同じになるため，ここでは特に考慮しない
+  earned_credits_campus = 0
+  # big_genreの上限単位はhanteiに含まれているため，それを使用する
+  big_genre_max_credits = {bg: bg_data["credits"] for bg, bg_data in big_genre.items()}
+  # small_genreごとに該当するbig_genreへ加算すればいいのでbig_genre_max_creditsをコピーして使用
+  big_genre_credits_for_campus = {bg: 0 for bg in big_genre.keys()}
+  for sg, counted_credits in counted_sg_credits.items():
+    for bg, sg_list in bg_sg_includings.items():
+      if sg in sg_list:
+        big_genre_credits_for_campus[bg] += counted_credits
+        break
+  for bg, bg_counted in big_genre_credits_for_campus.items():
+    earned_credits_campus += min(bg_counted, big_genre_max_credits[bg])
+
+  return earned_credits, earned_credits_campus
 
 # all_classesからGPAを計算する関数
 def calculate_gpa(all_classes):
@@ -227,16 +246,16 @@ def calculate_gpa(all_classes):
   for course, grade in all_classes[0].items():
     total_points += grade
     total_courses += 1
-  # 選択科目は4科目分参入する
+  # 選択科目は上位成績の4科目分参入する
   elective_grades = sorted(all_classes[1].values(), reverse=True)[:4]
   for grade in elective_grades:
     total_points += grade
     total_courses += 1
-  # 選択科目の4科目に算入されなかったが単位を取得している科目数分だけ加算
+  # 選択科目の4科目に算入されなかったが単位を修得している科目数分だけ加算
   for grade in all_classes[1].values():
     if grade > 0.0 and grade not in elective_grades:
       total_points += 1
-  # 選択必修科目は1科目分参入する
+  # 選択必修科目は上位成績の1科目分参入する
   elective_compulsory_grades = sorted(all_classes[2].values(), reverse=True)[:1]
   for grade in elective_compulsory_grades:
     total_points += grade
@@ -267,22 +286,24 @@ if __name__ == "__main__":
 
   with open("hantei.json", 'r', encoding='utf-8') as f:
     hantei = json.load(f)
-  hantei_data_keys = hantei["data"].keys() # {講義名: {genre: AA, credits: 0}, ...}
+  hantei_data = hantei["data"] # {講義名: {genre: AA, credits: 0}, ...}
 
   # このpyファイルと同じ階層に存在するCSVファイルに対してそれぞれのGPAを計算する
   for filename in glob.glob('*.csv'):
     # filenameがgpa_results.csvの場合はスキップ
     if filename == "gpa_results.csv":
       continue
-    initialize_all_classes(all_classes) # all_classesを初期化
     if filename.endswith(".csv"): # CSVファイルのみ処理
-      all_classes, student_id, edited_probability_flag, graduated_classes = parse_csv_data(filename, all_classes, hantei_data_keys) # csv解析
+      # all_classesを初期化
+      all_classes = initialize_all_classes(all_classes)
+
+      all_classes, student_id, edited_probability_flag, graduated_classes = parse_csv_data(filename, all_classes, hantei_data) # csv解析
       gpa = calculate_gpa(all_classes) # GPA計算
 
-      earned_credits = calculate_earned_credits(graduated_classes, all_classes, hantei) # 卒業単位のうち取得単位数を計算
+      earned_credits, earned_credits_campus = calculate_earned_credits(graduated_classes, all_classes, hantei) # 卒業単位のうち修得単位数を計算
 
-      print(f" 学生番号: {student_id}, GPA: {gpa:.3f}, 取得単位数: {earned_credits}") # 結果表示
-      gpa_results.append((student_id, gpa, earned_credits, edited_probability_flag)) # 結果を出力用に保存
+      print(f" 学生番号: {student_id}, GPA: {gpa:.3f}, 修得単位数: {earned_credits}, 修得単位数(Campus Square): {earned_credits_campus}") # 結果表示
+      gpa_results.append((student_id, gpa, earned_credits, earned_credits_campus, edited_probability_flag)) # 結果を出力用に保存
   print("すべてのGPA計算が完了しました。")
 
   # gpa_resultsを学生番号順にソートする
@@ -292,7 +313,7 @@ if __name__ == "__main__":
   output_filename = "gpa_results.csv"
   with open(output_filename, 'w', newline='', encoding='utf-8-sig') as f:
     csv_writer = csv.writer(f)
-    csv_writer.writerow(['学生番号', 'GPA', '修得単位数', 'csv編集の可能性の高さ'])
-    for student_id, gpa, earned_credits, edited_probability_flag in gpa_results:
-      csv_writer.writerow([student_id, f"{gpa:.3f}", earned_credits, edited_probability_flag])
+    csv_writer.writerow(['学生番号', 'GPA', '修得単位数', '修得単位数(Campus Square)', 'csv編集の可能性の高さ'])
+    for student_id, gpa, earned_credits, earned_credits_campus, edited_probability_flag in gpa_results:
+      csv_writer.writerow([student_id, f"{gpa:.3f}", earned_credits, earned_credits_campus, edited_probability_flag])
   print(f"GPA結果が {output_filename} に保存されました。")
